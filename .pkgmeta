@@ -1,6 +1,11 @@
-# BigWigsMods/packager configuration. No libraries, so nothing to fetch.
+# BigWigsMods/packager configuration. Libs/ is checked in, so nothing to fetch.
 
 package-as: RoleRoulette
+
+# Hand-written release notes, used verbatim.
+manual-changelog:
+  filename: CHANGELOG.txt
+  markup-type: text
 
 # Development-only; nothing here should reach a player's AddOns folder.
 ignore:

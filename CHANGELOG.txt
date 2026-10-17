@@ -1,0 +1,22 @@
+RoleRoulette - Changelog
+========================
+
+
+V1.0 (2026-10-18)
+-----
+
+First release.
+
+- Randomly picks who tanks, who heals and who DPSes, and a spec for each
+  person from the ones they're willing to play (alts included).
+- Works for one to five people: five get 1 tank / 1 healer / 3 DPS, fewer get
+  a slice of that, for friends picking specs before queueing.
+- Roster with Import Party, a spec picker per person, Re-roll, and Announce to
+  party chat.
+- Rotate roles: makes it much less likely anyone gets the same role as last
+  game.
+- If no group can be made, it says why ("Nobody has a healer spec in their
+  pool").
+- Same window and theme as SquizzFrames and Squizzumables, and part of the
+  combined /squizz window when either is installed.
+- /rr or /roleroulette.
