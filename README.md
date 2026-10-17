@@ -10,8 +10,8 @@ Copy the `RoleRoulette` folder to
 
     World of Warcraft/_retail_/Interface/AddOns/
 
-so that `AddOns/RoleRoulette/RoleRoulette.toc` exists, then restart the game
-(or `/reload` if it is already running) and make sure RoleRoulette is ticked in
+so that `AddOns/RoleRoulette/RoleRoulette.toc` exists, then log in (or `/reload`
+if you're already in game). If it doesn't load, check RoleRoulette is ticked in
 the AddOns list on the character screen.
 
 ## Use
