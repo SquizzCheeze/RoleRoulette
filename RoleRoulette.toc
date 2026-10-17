@@ -1,0 +1,14 @@
+## Interface: 120105
+## Title: RoleRoulette
+## Notes: Randomly assigns a tank, a healer, three DPS and a spec for each of them. /rr
+## Author: Squizz
+## Version: 1.0
+## SavedVariables: RoleRouletteDB
+## IconTexture: Interface\Icons\INV_Misc_Dice_02
+
+# Interface 120105 = retail 12.1.5 (checked against Blizzard's live UI source,
+# build 70448). After a patch, update the number on the first line to the new
+# client's: in game, /dump select(4, GetBuildInfo())
+
+Core.lua
+UI.lua

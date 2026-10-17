@@ -1,0 +1,9 @@
+# BigWigsMods/packager configuration. No libraries, so nothing to fetch.
+
+package-as: RoleRoulette
+
+# Development-only; nothing here should reach a player's AddOns folder.
+ignore:
+  - .github
+  - .pkgmeta
+  - test_randomizer.lua
