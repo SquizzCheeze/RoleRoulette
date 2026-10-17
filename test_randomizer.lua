@@ -40,22 +40,34 @@ local function Check(cond, what)
     end
 end
 
--- Composition is 1/1/3, specs match roles, ordering is T, H, D.
-local function CheckValid(result, label)
+local RANK = {TANK = 1, HEALER = 2, DAMAGER = 3}
+
+-- n people assigned, specs match roles, ordered T, H, D. Five people are
+-- exactly 1/1/3; fewer never exceed it. Returns the role counts.
+local function CheckValid(result, label, n)
+    n = n or 5
     Check(result.ok, label .. ": roll succeeded (" .. tostring(result.message) .. ")")
     if not result.ok then return end
     local a = result.assignment
-    Check(#a == 5, label .. ": five people assigned")
+    Check(#a == n, label .. ": " .. n .. " people assigned")
     local count = {TANK = 0, HEALER = 0, DAMAGER = 0}
     local seen = {}
-    for _, e in ipairs(a) do
+    for k, e in ipairs(a) do
         count[e.role] = count[e.role] + 1
         Check(roleOf[e.specID] == e.role, label .. ": " .. e.name .. "'s spec matches their role")
         Check(not seen[e.name], label .. ": " .. e.name .. " assigned once")
         seen[e.name] = true
+        if k > 1 then
+            Check(RANK[a[k - 1].role] <= RANK[e.role], label .. ": ordered tank, healer, DPS")
+        end
     end
-    Check(count.TANK == 1 and count.HEALER == 1 and count.DAMAGER == 3, label .. ": 1/1/3")
-    Check(a[1].role == "TANK" and a[2].role == "HEALER", label .. ": ordered tank, healer, DPS")
+    if n == 5 then
+        Check(count.TANK == 1 and count.HEALER == 1 and count.DAMAGER == 3, label .. ": 1/1/3")
+    else
+        Check(count.TANK <= 1 and count.HEALER <= 1 and count.DAMAGER <= 3,
+            label .. ": within 1/1/3")
+    end
+    return count
 end
 
 -----------------------------------------------------------------------
@@ -96,6 +108,28 @@ withBench[6].available = false
 CheckValid(R.Roll(withBench, roleOf, {random = rng}), "bench ignored")
 
 -----------------------------------------------------------------------
+-- 1b. Fewer than five: a slice of 1/1/3, never two of a capped role
+-----------------------------------------------------------------------
+
+-- Two friends who'll play anything: over many rolls every legal shape comes
+-- up (including two DPS), and never two tanks or two healers.
+local pair = {M("Ann", 1, 3, 5), M("Bob", 2, 4, 6)}
+local shapes = {}
+for i = 1, 700 do
+    local c = CheckValid(R.Roll(pair, roleOf, {random = rng}), "pair #" .. i, 2)
+    if not c then break end
+    shapes[c.TANK .. c.HEALER .. c.DAMAGER] = true
+end
+for _, shape in ipairs({"110", "101", "011", "002"}) do
+    Check(shapes[shape], "pair: shape T/H/D " .. shape .. " comes up")
+end
+
+CheckValid(R.Roll({M("Solo", 3)}, roleOf, {random = rng}), "one person", 1)
+CheckValid(R.Roll({M("A", 1), M("B", 3), M("C", 5), M("D", 6)}, roleOf, {random = rng}), "four", 4)
+-- Two DPS-only friends need neither a tank nor a healer.
+CheckValid(R.Roll({M("A", 5), M("B", 6)}, roleOf, {random = rng}), "two DPS only", 2)
+
+-----------------------------------------------------------------------
 -- 2. Impossible rosters give the right error
 -----------------------------------------------------------------------
 
@@ -107,19 +141,28 @@ local function ExpectError(roster, code, label)
     return r
 end
 
-ExpectError({M("A", 1), M("B", 3), M("C", 5), M("D", 6)}, "WRONG_COUNT", "four available")
+local none = {M("A", 1), M("B", 3)}
+none[1].available, none[2].available = false, false
+ExpectError(none, "WRONG_COUNT", "nobody available")
 local six = {M("A", 1), M("B", 3), M("C", 5), M("D", 6), M("E", 7), M("F", 5)}
 local r6 = ExpectError(six, "WRONG_COUNT", "six available")
-Check(r6.message:find("6", 1, true) ~= nil, "six available: message says how many are ticked")
+Check(r6.message:find("6", 1, true) ~= nil, "six available: message says how many are on")
 
+-- A full group needs a tank and a healer.
 ExpectError({M("A", 5), M("B", 3), M("C", 5), M("D", 6), M("E", 7)}, "NO_TANK", "no tank")
 local noHeal = ExpectError({M("A", 1), M("B", 5), M("C", 5), M("D", 6), M("E", 7)}, "NO_HEALER", "no healer")
 Check(noHeal.message == "Nobody has a healer spec in their pool.", "no healer: wording")
-ExpectError({M("A", 1), M("B"), M("C", 5), M("D", 6), M("E", 7)}, "EMPTY_POOL", "empty pool")
 ExpectError({M("Solo", 1, 3), M("B", 5), M("C", 5), M("D", 6), M("E", 7)}, "SAME_TANK_HEALER", "one tank-healer")
-ExpectError({M("A", 1), M("B", 3), M("C", 4), M("D", 6), M("E", 7)}, "TOO_FEW_DPS", "three can't DPS")
--- Both healers can't DPS; one of them has to tank, and neither can.
-ExpectError({M("T", 1, 5), M("H1", 3), M("H2", 4), M("D1", 6), M("D2", 7)}, "NON_DPS_STUCK", "two pure healers")
+
+ExpectError({M("A", 1), M("B"), M("C", 5), M("D", 6), M("E", 7)}, "EMPTY_POOL", "empty pool")
+ExpectError({M("A", 1), M("B")}, "EMPTY_POOL", "empty pool, pair")
+-- Any size: two who can only tank, or only heal, can't both fit.
+ExpectError({M("A", 1), M("B", 2)}, "TOO_MANY_TANKS", "two tank-only friends")
+ExpectError({M("A", 1), M("B", 3), M("C", 4), M("D", 6), M("E", 7)}, "TOO_MANY_HEALERS", "two pure healers")
+-- Three who can tank or heal but not DPS: only two such slots.
+ExpectError({M("A", 1, 3), M("B", 2, 4), M("C", 1, 4)}, "TOO_FEW_DPS", "three can't DPS")
+-- Four who can only DPS: three DPS slots.
+ExpectError({M("A", 5), M("B", 6), M("C", 7), M("D", 5)}, "TOO_MANY_DPS", "four DPS only")
 
 -----------------------------------------------------------------------
 -- 3. Rotation weighting reduces repeats

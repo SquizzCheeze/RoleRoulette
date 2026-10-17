@@ -23,6 +23,12 @@ R.ORDER = {"TANK", "HEALER", "DAMAGER"}
 R.ROLE_LABEL = {TANK = "Tank", HEALER = "Healer", DAMAGER = "DPS"}
 R.GROUP_SIZE = 5
 
+-- A dungeon group's slots. Fewer than five people get a slice of it -- two
+-- friends picking specs before queueing can be tank + DPS, or two DPS, but
+-- never two tanks -- and the group finder fills the rest. Five fill it exactly:
+-- 1 tank, 1 healer, 3 DPS.
+R.CAPS = {TANK = 1, HEALER = 1, DAMAGER = 3}
+
 -- With rotation weighting on, an assignment's weight is multiplied by this
 -- once for every member who would get the same role as last time. 0.2 makes a
 -- full repeat 1/3125 as likely as a full rotation, while never ruling one out
@@ -69,66 +75,83 @@ function R.Available(roster)
     return out
 end
 
--- Every valid {tank index, healer index}; everyone else DPSes.
+-- Every valid assignment, as a list of role arrays ({[i] = role}): each
+-- person in a role their pool covers and no role over its R.CAPS. The caps
+-- add up to five, so five people always come out exactly 1/1/3. At most
+-- 3^5 = 243 candidates, so brute force.
 function R.Enumerate(roles)
-    local valid = {}
     local n = #roles
-    for t = 1, n do
-        if roles[t].TANK then
-            for h = 1, n do
-                if h ~= t and roles[h].HEALER then
-                    local ok = true
-                    for d = 1, n do
-                        if d ~= t and d ~= h and not roles[d].DAMAGER then
-                            ok = false
-                            break
-                        end
-                    end
-                    if ok then valid[#valid + 1] = {tank = t, healer = h} end
-                end
+    local valid, current, used = {}, {}, {TANK = 0, HEALER = 0, DAMAGER = 0}
+    local function Walk(i)
+        if i > n then
+            local copy = {}
+            for k = 1, n do copy[k] = current[k] end
+            valid[#valid + 1] = copy
+            return
+        end
+        for _, role in ipairs(R.ORDER) do
+            if roles[i][role] and used[role] < R.CAPS[role] then
+                used[role] = used[role] + 1
+                current[i] = role
+                Walk(i + 1)
+                used[role] = used[role] - 1
             end
         end
     end
+    Walk(1)
     return valid
 end
 
 -- Why no valid assignment exists, most specific reason first.
 function R.Diagnose(members, roles)
     local empty, tanks, healers, nonDps = {}, {}, {}, {}
+    local only = {TANK = {}, HEALER = {}, DAMAGER = {}}  -- pools of one role
     for i, m in ipairs(members) do
         local r = roles[i]
         if not (r.TANK or r.HEALER or r.DAMAGER) then empty[#empty + 1] = m.name end
         if r.TANK then tanks[#tanks + 1] = m.name end
         if r.HEALER then healers[#healers + 1] = m.name end
         if not r.DAMAGER then nonDps[#nonDps + 1] = m.name end
+        local count, which = 0, nil
+        for role in pairs(r) do count, which = count + 1, role end
+        if count == 1 then table.insert(only[which], m.name) end
     end
 
     if #empty > 0 then
         return Fail("EMPTY_POOL", JoinNames(empty)
             .. (#empty == 1 and " has" or " have") .. " no specs ticked.")
     end
-    if #tanks == 0 then
-        return Fail("NO_TANK", "Nobody has a tank spec in their pool.")
+    if #only.TANK > 1 then
+        return Fail("TOO_MANY_TANKS", JoinNames(only.TANK)
+            .. " can only tank, and a group has room for one tank.")
     end
-    if #healers == 0 then
-        return Fail("NO_HEALER", "Nobody has a healer spec in their pool.")
-    end
-    if #tanks == 1 and #healers == 1 and tanks[1] == healers[1] then
-        return Fail("SAME_TANK_HEALER", tanks[1]
-            .. " is the only possible tank and also the only possible healer.")
+    if #only.HEALER > 1 then
+        return Fail("TOO_MANY_HEALERS", JoinNames(only.HEALER)
+            .. " can only heal, and a group has room for one healer.")
     end
     if #nonDps > 2 then
         return Fail("TOO_FEW_DPS", JoinNames(nonDps)
-            .. " have no DPS spec, but only two people can tank or heal.")
+            .. " have no DPS spec, but a group has room for just one tank and one healer.")
     end
-    if #nonDps > 0 then
-        return Fail("NON_DPS_STUCK", JoinNames(nonDps)
-            .. (#nonDps == 1 and " has" or " have")
-            .. " no DPS spec, so must tank or heal, but the rest of the group"
-            .. " can't cover the other role.")
+    -- A full group needs both a tank and a healer; a smaller one does not.
+    if #members == R.GROUP_SIZE then
+        if #tanks == 0 then
+            return Fail("NO_TANK", "Nobody has a tank spec in their pool.")
+        end
+        if #healers == 0 then
+            return Fail("NO_HEALER", "Nobody has a healer spec in their pool.")
+        end
+        if #tanks == 1 and #healers == 1 and tanks[1] == healers[1] then
+            return Fail("SAME_TANK_HEALER", tanks[1]
+                .. " is the only possible tank and also the only possible healer.")
+        end
+    end
+    if #only.DAMAGER > R.CAPS.DAMAGER then
+        return Fail("TOO_MANY_DPS", JoinNames(only.DAMAGER)
+            .. " can only DPS, and a group has room for three.")
     end
     return Fail("NO_COMBINATION",
-        "No combination gives 1 tank, 1 healer and 3 DPS with these pools.")
+        "No combination fits 1 tank, 1 healer and 3 DPS with these pools.")
 end
 
 -- Roll a group.
@@ -148,9 +171,12 @@ function R.Roll(roster, roleOf, opts)
     local random = opts.random or math.random
     local members = R.Available(roster)
 
-    if #members ~= R.GROUP_SIZE then
+    if #members == 0 then
+        return Fail("WRONG_COUNT", "Switch on at least one person who's playing.")
+    end
+    if #members > R.GROUP_SIZE then
         return Fail("WRONG_COUNT", string.format(
-            "Tick exactly %d available members (%d ticked).", R.GROUP_SIZE, #members))
+            "A group has room for %d, and %d are switched on.", R.GROUP_SIZE, #members))
     end
 
     local roles = {}
@@ -159,11 +185,7 @@ function R.Roll(roster, roleOf, opts)
     local valid = R.Enumerate(roles)
     if #valid == 0 then return R.Diagnose(members, roles) end
 
-    local function RoleAt(a, i)
-        if i == a.tank then return "TANK" end
-        if i == a.healer then return "HEALER" end
-        return "DAMAGER"
-    end
+    local function RoleAt(a, i) return a[i] end
 
     -- Weighted pick. Unweighted is the same code with every weight 1.
     local factor = opts.factor or R.REPEAT_FACTOR
@@ -230,7 +252,8 @@ local DEFAULTS = {
     roster = {},
     history = {},
     settings = {rotation = true, autoAnnounce = false},
-    position = nil,
+    -- window = {point, relPoint, x, y, w, h}: written by UI.lua when the
+    -- window is moved or closed.
 }
 
 local function FillDefaults(dst, src)
@@ -492,8 +515,15 @@ events:SetScript("OnEvent", function(_, event, arg1)
         RoleRouletteDB = RoleRouletteDB or {}
         FillDefaults(RoleRouletteDB, DEFAULTS)
         ns.db = RoleRouletteDB
+        RoleRouletteDB.position = nil  -- the 1.0 window's, before the shared window
+        -- Join the theme shared with SquizzFrames and Squizzumables. No seed:
+        -- RoleRoulette never had a look of its own to keep, so whatever the
+        -- other two have chosen wins, and alone it gets the default.
+        local LST = LibStub and LibStub("LibSquizzTheme-1.0", true)
+        if LST then LST:Attach(RoleRouletteDB, nil, 0) end
     elseif event == "PLAYER_LOGIN" then
         ns.BuildClassData()
+        if ns.UI then ns.UI.Register() end
     elseif event == "PLAYER_REGEN_ENABLED" then
         local queued = pending
         pending = {}

@@ -1,169 +1,155 @@
 -- RoleRoulette: UI
 --
--- The main window (roster on the left, result on the right) and the spec
--- picker that opens beside it for the selected member. Built on first open,
--- never in combat: creating or resizing frames waits for PLAYER_REGEN_ENABLED
--- through ns.OutOfCombat. Plain values (text, checks, colours) still update
--- in combat.
+-- The window is LibSquizzShell-1.0, the one SquizzFrames and Squizzumables
+-- use, so RoleRoulette looks like them, follows the shared theme and appears
+-- in the combined /squizz window. Two pages:
+--
+--   Roll      roster | specs for the selected member | result
+--   Settings  rotation, auto-announce, theme
+--
+-- Frames are never created in combat: the window waits for combat to end the
+-- first time it is opened, and new roster rows wait the same way (through
+-- ns.OutOfCombat). Text, ticks and colours still update in combat.
 
 local _, ns = ...
-local R = ns.Randomizer
+local R, W = ns.Randomizer, ns.W
 
 local UI = {}
 ns.UI = UI
 
-local ROW_HEIGHT = 24
-local MAIN_W, MAIN_H = 620, 470
-local PICKER_W = 460
+local ADDON_ID = "RoleRoulette"
+local ROSTER_W, RESULT_W, GAP = 230, 250, 10
+local ROW_H = 24
+local SPEC_ROW_H = 22
+local RESULT_ROW_H = 46
 
-local BACKDROP = {
-    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
-    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-    tile = true, tileSize = 32, edgeSize = 32,
-    insets = {left = 11, right = 12, top = 12, bottom = 11},
-}
+local function Shell() return LibStub("LibSquizzShell-1.0", true) end
+local function Theme() return LibStub("LibSquizzTheme-1.0", true) end
 
-local main, picker
-local selected        -- the member whose specs the picker shows
-local rosterRows = {}
-local resultRows = {}
-local message         -- red text under the result: errors, import counts
-
------------------------------------------------------------------------
--- Helpers
------------------------------------------------------------------------
-
-local function MakeWindow(name, w, h, title)
-    local f = CreateFrame("Frame", name, UIParent, "BackdropTemplate")
-    f:SetSize(w, h)
-    f:SetBackdrop(BACKDROP)
-    f:SetFrameStrata("DIALOG")
-    f:SetClampedToScreen(true)
-    f:EnableMouse(true)
-    f.title = f:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
-    f.title:SetPoint("TOP", 0, -18)
-    f.title:SetText(title)
-    local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
-    close:SetPoint("TOPRIGHT", -6, -6)
-    return f
-end
-
-local function Button(parent, text, w, h)
-    local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
-    b:SetSize(w, h or 24)
-    b:SetText(text)
-    return b
-end
-
-local function Check(parent, size)
-    local c = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
-    c:SetSize(size or 24, size or 24)
-    return c
-end
-
-local function Label(parent, template, text)
-    local fs = parent:CreateFontString(nil, "ARTWORK", template or "GameFontHighlight")
-    if text then fs:SetText(text) end
-    return fs
-end
-
-local function ScrollArea(parent, w, h)
-    local sf = CreateFrame("ScrollFrame", nil, parent, "UIPanelScrollFrameTemplate")
-    sf:SetSize(w, h)
-    local child = CreateFrame("Frame", nil, sf)
-    child:SetSize(w, 1)
-    sf:SetScrollChild(child)
-    return sf, child
-end
-
-local function SetMessage(text, r, g, b)
-    if not message then return end
-    message:SetText(text or "")
-    message:SetTextColor(r or 1, g or 0.3, b or 0.3)
-end
+local win
+local selected                  -- the member whose specs are shown
+local roll = {}                 -- the Roll page's widgets, once built
+local rosterRows, resultRows = {}, {}
+local specRows = {}             -- [specID] = row
+local classHeaders = {}
 
 -----------------------------------------------------------------------
--- Roster panel
+-- Roster column
 -----------------------------------------------------------------------
+
+local function SetMessage(text, colorKey)
+    if not roll.message then return end
+    roll.message:SetText(text or "")
+    roll.message:SetTextColor(W.RGBA(colorKey or "critical"))
+end
+
+local function PaintRosterRow(row)
+    local m = row.member
+    local isSel = m and m == selected
+    if isSel then
+        local r, g, b = W.Accent()
+        row:SetBackdropColor(r, g, b, 0.14)
+        row.bar:SetColorTexture(r, g, b, 1)
+        row.bar:Show()
+        row.name:SetTextColor(W.RGBA("textBright"))
+    else
+        if row.hover then
+            row:SetBackdropColor(W.RGBA("controlHi"))
+        else
+            row:SetBackdropColor(0, 0, 0, 0)
+        end
+        row.bar:Hide()
+        row.name:SetTextColor(W.RGBA("text"))
+    end
+end
 
 local function CreateRosterRow(parent, i)
-    local row = CreateFrame("Frame", nil, parent)
-    row:SetSize(236, ROW_HEIGHT)
-    row:SetPoint("TOPLEFT", 0, -(i - 1) * ROW_HEIGHT)
+    local row = CreateFrame("Button", nil, parent, "BackdropTemplate")
+    row:SetHeight(ROW_H)
+    row:SetPoint("TOPLEFT", 0, -(i - 1) * (ROW_H + 2))
+    row:SetPoint("TOPRIGHT", 0, -(i - 1) * (ROW_H + 2))
+    row:SetBackdrop({bgFile = "Interface\\Buttons\\WHITE8X8"})
 
-    row.available = Check(row, 22)
-    row.available:SetPoint("LEFT", 0, 0)
-    row.available:SetScript("OnClick", function(self)
+    row.bar = row:CreateTexture(nil, "OVERLAY")
+    row.bar:SetPoint("TOPLEFT")
+    row.bar:SetPoint("BOTTOMLEFT")
+    row.bar:SetWidth(3)
+
+    row.available = W.Toggle(row, nil, function(on)
         if row.member then
-            row.member.available = self:GetChecked() and true or false
+            row.member.available = on
             UI.RefreshCount()
         end
     end)
+    row.available:SetPoint("LEFT", 8, 0)
+    row.available.tip = "Playing tonight"
 
-    -- The name is a button: clicking it opens the spec picker.
-    row.name = CreateFrame("Button", nil, row)
-    row.name:SetSize(122, ROW_HEIGHT)
-    row.name:SetPoint("LEFT", row.available, "RIGHT", 2, 0)
-    row.name.text = Label(row.name, "GameFontHighlight")
-    row.name.text:SetPoint("LEFT", 2, 0)
-    row.name.text:SetPoint("RIGHT", -2, 0)
-    row.name.text:SetJustifyH("LEFT")
-    row.name.text:SetWordWrap(false)
-    row.name:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
-    row.selectedTex = row.name:CreateTexture(nil, "BACKGROUND")
-    row.selectedTex:SetAllPoints()
-    row.selectedTex:SetColorTexture(1, 0.82, 0, 0.18)
-    row.name:SetScript("OnClick", function()
-        if row.member then UI.Select(row.member) end
+    -- Remove: a quiet X that turns red on hover.
+    row.remove = CreateFrame("Button", nil, row)
+    row.remove:SetSize(20, ROW_H)
+    row.remove:SetPoint("RIGHT", -2, 0)
+    local x = W.Text(row.remove, 12, "textDim")
+    x:SetPoint("CENTER")
+    x:SetText("x")
+    row.remove:SetScript("OnEnter", function(self)
+        x:SetTextColor(W.RGBA("danger"))
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Remove from the roster", 1, 1, 1)
+        GameTooltip:Show()
+    end)
+    row.remove:SetScript("OnLeave", function()
+        x:SetTextColor(W.RGBA("textDim"))
+        GameTooltip:Hide()
+    end)
+    row.remove:SetScript("OnClick", function()
+        local m = row.member
+        if not m then return end
+        ns.RemoveMember(m)
+        if selected == m then selected = nil end
+        UI.RefreshRoster()
+        UI.RefreshSpecs()
     end)
 
-    -- Which roles their pool covers; dimmed when not covered.
+    -- The roles their pool covers, dimmed when not covered.
     row.roles = {}
-    local prev = row.name
-    for _, role in ipairs(R.ORDER) do
+    local prev = row.remove
+    for k = #R.ORDER, 1, -1 do
+        local role = R.ORDER[k]
         local t = row:CreateTexture(nil, "ARTWORK")
-        t:SetSize(16, 16)
-        t:SetPoint("LEFT", prev, "RIGHT", 2, 0)
+        t:SetSize(15, 15)
+        t:SetPoint("RIGHT", prev, "LEFT", -2, 0)
         ns.SetRoleIcon(t, role)
         row.roles[role] = t
         prev = t
     end
 
-    row.remove = CreateFrame("Button", nil, row, "UIPanelCloseButton")
-    row.remove:SetSize(22, 22)
-    row.remove:SetPoint("LEFT", prev, "RIGHT", 2, 0)
-    row.remove:SetScript("OnClick", function()
-        local m = row.member
-        if not m then return end
-        ns.RemoveMember(m)
-        if selected == m then UI.Select(nil) end
+    row.name = W.Text(row, 12, "text")
+    row.name:SetPoint("LEFT", row.available, "RIGHT", 8, 0)
+    row.name:SetPoint("RIGHT", prev, "LEFT", -4, 0)
+    row.name:SetJustifyH("LEFT")
+    row.name:SetWordWrap(false)
+
+    row:SetScript("OnEnter", function(self) self.hover = true PaintRosterRow(self) end)
+    row:SetScript("OnLeave", function(self) self.hover = false PaintRosterRow(self) end)
+    row:SetScript("OnClick", function(self)
+        if not self.member then return end
+        selected = (selected == self.member) and nil or self.member
         UI.RefreshRoster()
+        UI.RefreshSpecs()
     end)
     return row
 end
 
-local function PaintRosterRow(row, m)
-    row.member = m
-    row.available:SetChecked(m.available)
-    row.name.text:SetText(m.name)
-    local roles = R.RolesFor(m, ns.RoleOf)
-    for role, t in pairs(row.roles) do
-        t:SetDesaturated(not roles[role])
-        t:SetAlpha(roles[role] and 1 or 0.25)
-    end
-    row.selectedTex:SetShown(selected == m)
-    row:Show()
-end
-
 function UI.RefreshCount()
-    if not main then return end
+    if not roll.count then return end
+    -- One to five can roll; more than five is the only count that can't.
     local n = #R.Available(ns.db.roster)
-    local color = (n == R.GROUP_SIZE) and "|cff40ff40" or "|cffff6060"
-    main.count:SetText(string.format("Available: %s%d|r / %d", color, n, R.GROUP_SIZE))
+    roll.count:SetText(string.format("%d playing", n))
+    roll.count:SetTextColor(W.RGBA(n > R.GROUP_SIZE and "critical" or (n > 0 and "good" or "textDim")))
 end
 
 function UI.RefreshRoster()
-    if not main then return end
+    if not roll.rosterChild then return end
     local roster = ns.db.roster
     -- New rows are new frames, so they wait for combat to end.
     if #roster > #rosterRows and InCombatLockdown() then
@@ -171,59 +157,242 @@ function UI.RefreshRoster()
         return
     end
     for i = #rosterRows + 1, #roster do
-        rosterRows[i] = CreateRosterRow(main.rosterChild, i)
+        rosterRows[i] = CreateRosterRow(roll.rosterChild, i)
     end
     for i, row in ipairs(rosterRows) do
-        if roster[i] then PaintRosterRow(row, roster[i]) else row.member = nil row:Hide() end
+        local m = roster[i]
+        row.member = m
+        if m then
+            row.available:SetChecked(m.available)
+            row.name:SetText(m.name)
+            local roles = R.RolesFor(m, ns.RoleOf)
+            for role, t in pairs(row.roles) do
+                t:SetDesaturated(not roles[role])
+                t:SetAlpha(roles[role] and 1 or 0.2)
+            end
+            PaintRosterRow(row)
+            row:Show()
+        else
+            row:Hide()
+        end
     end
-    main.rosterChild:SetHeight(math.max(1, #roster * ROW_HEIGHT))
-    main.empty:SetShown(#roster == 0)
+    roll.rosterChild:SetHeight(math.max(1, #roster * (ROW_H + 2)))
+    roll.rosterEmpty:SetShown(#roster == 0)
     UI.RefreshCount()
 end
 
 local function AddFromBox()
-    local box = main.nameBox
-    local m, err = ns.AddMember(box:GetText())
+    local m, err = ns.AddMember(roll.nameBox:GetText())
     if not m then
         SetMessage(err)
         return
     end
-    box:SetText("")
+    roll.nameBox:SetText("")
+    roll.nameBox:ClearFocus()
     SetMessage("")
+    selected = m
     UI.RefreshRoster()
-    UI.Select(m)
+    UI.RefreshSpecs()
+end
+
+local function BuildRoster(panel)
+    local head = W.Section(panel, "Roster")
+    head:SetPoint("TOPLEFT", 10, -10)
+    head:SetPoint("TOPRIGHT", -10, -10)
+    roll.count = W.Text(panel, 11, "textDim")
+    roll.count:SetPoint("RIGHT", head, "RIGHT", 0, 0)
+
+    local add = W.Button(panel, "Add", 52, 22)
+    add:SetPoint("TOPRIGHT", head, "BOTTOMRIGHT", 0, -10)
+    add:SetScript("OnClick", AddFromBox)
+
+    local box = W.EditBox(panel, 10, "Name...")
+    box:SetPoint("TOPLEFT", head, "BOTTOMLEFT", 0, -10)
+    box:SetPoint("RIGHT", add, "LEFT", -6, 0)
+    box:SetMaxLetters(48)
+    box:SetScript("OnEnterPressed", AddFromBox)
+    roll.nameBox = box
+
+    local import = W.Button(panel, "Import Party", 10, 22)
+    import:SetPoint("TOPLEFT", box, "BOTTOMLEFT", 0, -6)
+    import:SetPoint("TOPRIGHT", add, "BOTTOMRIGHT", 0, -6)
+    import:SetScript("OnClick", function()
+        local added, skipped, unreadable = ns.ImportParty()
+        local parts = {added .. " added"}
+        if skipped > 0 then parts[#parts + 1] = skipped .. " already listed" end
+        if unreadable > 0 then parts[#parts + 1] = unreadable .. " unreadable right now" end
+        SetMessage("Import: " .. table.concat(parts, ", ") .. ".", "textDim")
+        UI.RefreshRoster()
+    end)
+
+    local sf, child = W.ScrollArea(panel)
+    sf:SetPoint("TOPLEFT", import, "BOTTOMLEFT", -4, -10)
+    sf:SetPoint("BOTTOMRIGHT", -14, 8)
+    roll.rosterChild = child
+
+    roll.rosterEmpty = W.Text(panel, 11, "textDim")
+    roll.rosterEmpty:SetPoint("TOPLEFT", sf, "TOPLEFT", 8, -10)
+    roll.rosterEmpty:SetPoint("RIGHT", panel, "RIGHT", -12, 0)
+    roll.rosterEmpty:SetJustifyH("LEFT")
+    roll.rosterEmpty:SetText("Add people by name or import your party, then click a name to choose their specs.")
 end
 
 -----------------------------------------------------------------------
--- Result panel
+-- Specs column
+-----------------------------------------------------------------------
+
+local function PaintSpecRow(row)
+    local on = selected and ns.HasSpec(selected, row.specID)
+    if on then
+        local r, g, b = W.Accent()
+        row.box:SetBackdropColor(r, g, b, 1)
+    else
+        row.box:SetBackdropColor(W.RGBA("control"))
+    end
+    if row.hover then
+        row:SetBackdropColor(W.RGBA("controlHi"))
+    else
+        row:SetBackdropColor(0, 0, 0, 0)
+    end
+    row.name:SetTextColor(W.RGBA(on and "textBright" or "text"))
+end
+
+local function BuildSpecs(panel)
+    roll.specHead = W.Section(panel, "Specs")
+    roll.specHead:SetPoint("TOPLEFT", 10, -10)
+    roll.specHead:SetPoint("TOPRIGHT", -10, -10)
+
+    local clear = W.Button(panel, "Clear", 52, 18)
+    clear:SetPoint("RIGHT", roll.specHead, "RIGHT", 0, 1)
+    clear:SetScript("OnClick", function()
+        if not selected then return end
+        wipe(selected.specs)
+        UI.RefreshSpecs()
+        UI.RefreshRoster()
+    end)
+    roll.specClear = clear
+
+    local hint = W.Text(panel, 11, "textDim")
+    hint:SetPoint("TOPLEFT", roll.specHead, "BOTTOMLEFT", 0, -8)
+    hint:SetText("Tick everything they're willing to play.")
+    roll.specHint = hint
+
+    local sf, child = W.ScrollArea(panel)
+    sf:SetPoint("TOPLEFT", hint, "BOTTOMLEFT", -4, -8)
+    sf:SetPoint("BOTTOMRIGHT", -14, 8)
+    roll.specScroll = sf
+
+    roll.specEmpty = W.Text(panel, 12, "textDim")
+    roll.specEmpty:SetPoint("CENTER", panel, "CENTER", 0, 20)
+    roll.specEmpty:SetWidth(220)
+    roll.specEmpty:SetText("Click a name in the roster to choose what they'll play.")
+
+    local y = 0
+    for _, class in ipairs(ns.Classes) do
+        local header = W.Text(child, 12, "text")
+        header:SetPoint("TOPLEFT", 4, -y - 4)
+        header:SetText(class.name)
+        header:SetTextColor(ns.ClassColor(class.classID))
+        classHeaders[#classHeaders + 1] = header
+        y = y + 22
+
+        for _, spec in ipairs(class.specs) do
+            local row = CreateFrame("Button", nil, child, "BackdropTemplate")
+            row:SetHeight(SPEC_ROW_H)
+            row:SetPoint("TOPLEFT", 0, -y)
+            row:SetPoint("TOPRIGHT", 0, -y)
+            row:SetBackdrop({bgFile = "Interface\\Buttons\\WHITE8X8"})
+            row.specID, row.classID = spec.specID, class.classID
+
+            row.box = CreateFrame("Frame", nil, row, "BackdropTemplate")
+            row.box:SetSize(12, 12)
+            row.box:SetPoint("LEFT", 10, 0)
+            W.Backdrop(row.box, "control", "border")
+
+            local role = row:CreateTexture(nil, "ARTWORK")
+            role:SetSize(15, 15)
+            role:SetPoint("LEFT", row.box, "RIGHT", 8, 0)
+            ns.SetRoleIcon(role, spec.role)
+
+            local icon = row:CreateTexture(nil, "ARTWORK")
+            icon:SetSize(18, 18)
+            icon:SetPoint("LEFT", role, "RIGHT", 5, 0)
+            icon:SetTexture(spec.icon)
+            icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+
+            row.name = W.Text(row, 12, "text")
+            row.name:SetPoint("LEFT", icon, "RIGHT", 7, 0)
+            row.name:SetText(spec.name)
+
+            row:SetScript("OnEnter", function(self) self.hover = true PaintSpecRow(self) end)
+            row:SetScript("OnLeave", function(self) self.hover = false PaintSpecRow(self) end)
+            row:SetScript("OnClick", function(self)
+                if not selected then return end
+                local on = not ns.HasSpec(selected, self.specID)
+                ns.SetSpec(selected, self.classID, self.specID, on)
+                PlaySound(on and SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON
+                    or SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_OFF)
+                PaintSpecRow(self)
+                UI.RefreshRoster()
+            end)
+            specRows[spec.specID] = row
+            y = y + SPEC_ROW_H + 1
+        end
+        y = y + 10
+    end
+    child:SetHeight(math.max(1, y))
+end
+
+function UI.RefreshSpecs()
+    if not roll.specHead then return end
+    local has = selected ~= nil
+    roll.specHead:SetText(has and ("Specs for " .. selected.name) or "Specs")
+    roll.specScroll:SetShown(has)
+    roll.specHint:SetShown(has)
+    roll.specClear:SetShown(has)
+    roll.specEmpty:SetShown(not has)
+    for _, row in pairs(specRows) do PaintSpecRow(row) end
+end
+
+-----------------------------------------------------------------------
+-- Result column
 -----------------------------------------------------------------------
 
 local function CreateResultRow(parent, i)
     local row = CreateFrame("Frame", nil, parent)
-    row:SetSize(300, 40)
-    row:SetPoint("TOPLEFT", 0, -(i - 1) * 44)
+    row:SetHeight(RESULT_ROW_H)
+    row:SetPoint("TOPLEFT", 0, -(i - 1) * RESULT_ROW_H)
+    row:SetPoint("TOPRIGHT", 0, -(i - 1) * RESULT_ROW_H)
 
     row.role = row:CreateTexture(nil, "ARTWORK")
-    row.role:SetSize(28, 28)
-    row.role:SetPoint("LEFT", 0, 0)
+    row.role:SetSize(22, 22)
+    row.role:SetPoint("LEFT", 2, 0)
 
-    row.spec = row:CreateTexture(nil, "ARTWORK")
-    row.spec:SetSize(32, 32)
-    row.spec:SetPoint("LEFT", row.role, "RIGHT", 6, 0)
-    row.spec:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+    local frame = CreateFrame("Frame", nil, row, "BackdropTemplate")
+    frame:SetSize(34, 34)
+    frame:SetPoint("LEFT", row.role, "RIGHT", 8, 0)
+    W.Backdrop(frame, "control", "border")
+    row.spec = frame:CreateTexture(nil, "ARTWORK")
+    row.spec:SetPoint("TOPLEFT", 1, -1)
+    row.spec:SetPoint("BOTTOMRIGHT", -1, 1)
+    row.spec:SetTexCoord(0.08, 0.92, 0.08, 0.92)
 
-    row.who = Label(row, "GameFontNormalLarge")
-    row.who:SetPoint("TOPLEFT", row.spec, "TOPRIGHT", 8, -1)
+    row.who = W.Text(row, 14, "textBright")
+    row.who:SetPoint("TOPLEFT", frame, "TOPRIGHT", 9, -2)
+    row.who:SetPoint("RIGHT", row, "RIGHT", -4, 0)
     row.who:SetJustifyH("LEFT")
+    row.who:SetWordWrap(false)
 
-    row.detail = Label(row, "GameFontHighlightSmall")
-    row.detail:SetPoint("BOTTOMLEFT", row.spec, "BOTTOMRIGHT", 8, 1)
-    row.detail:SetTextColor(0.8, 0.8, 0.8)
+    row.detail = W.Text(row, 11, "textDim")
+    row.detail:SetPoint("BOTTOMLEFT", frame, "BOTTOMRIGHT", 9, 2)
+    row.detail:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+    row.detail:SetJustifyH("LEFT")
+    row.detail:SetWordWrap(false)
     return row
 end
 
 function UI.RefreshResult()
-    if not main then return end
+    if not roll.results then return end
     local last = ns.db.history.last
     local has = last and #last > 0
     for i, row in ipairs(resultRows) do
@@ -235,16 +404,16 @@ function UI.RefreshResult()
             row.spec:SetTexture(spec and spec.icon or 134400) -- question mark
             row.who:SetText(e.name)
             row.who:SetTextColor(ns.ClassColor(e.classID))
-            row.detail:SetText(string.format("%s %s", spec and spec.name or "Unknown spec",
-                class and class.name or ""))
+            row.detail:SetText(string.format("%s  %s %s", R.ROLE_LABEL[e.role] or "",
+                spec and spec.name or "Unknown spec", class and class.name or ""))
             row:Show()
         else
             row:Hide()
         end
     end
-    main.placeholder:SetShown(not has)
-    main.reroll:SetEnabled(has)
-    main.announce:SetEnabled(has)
+    roll.resultEmpty:SetShown(not has)
+    roll.reroll:SetEnabled(has)
+    roll.announce:SetEnabled(has)
 end
 
 local function DoRoll(isReroll)
@@ -253,252 +422,237 @@ local function DoRoll(isReroll)
     UI.RefreshResult()
 end
 
------------------------------------------------------------------------
--- Main window
------------------------------------------------------------------------
+local function BuildResult(panel)
+    local head = W.Section(panel, "Result")
+    head:SetPoint("TOPLEFT", 10, -10)
+    head:SetPoint("TOPRIGHT", -10, -10)
 
-local function SavePosition(f)
-    local point, _, relPoint, x, y = f:GetPoint(1)
-    ns.db.position = {point, relPoint, x, y}
-end
-
-local function RestorePosition(f)
-    f:ClearAllPoints()
-    local p = ns.db.position
-    if type(p) == "table" and p[1] then
-        f:SetPoint(p[1], UIParent, p[2], p[3], p[4])
-    else
-        f:SetPoint("CENTER", -PICKER_W / 2, 40)
-    end
-end
-
-local function CreateMain()
-    main = MakeWindow("RoleRouletteFrame", MAIN_W, MAIN_H, "Role Roulette")
-    main:SetMovable(true)
-    main:RegisterForDrag("LeftButton")
-    main:SetScript("OnDragStart", function(self) self:StartMoving() end)
-    main:SetScript("OnDragStop", function(self)
-        self:StopMovingOrSizing()
-        SavePosition(self)
-    end)
-    main:SetScript("OnHide", function() if picker then picker:Hide() end end)
-    RestorePosition(main)
-    tinsert(UISpecialFrames, "RoleRouletteFrame") -- Escape closes it
-
-    -- Left: roster
-    local rosterTitle = Label(main, "GameFontNormal", "Roster")
-    rosterTitle:SetPoint("TOPLEFT", 24, -48)
-
-    main.count = Label(main, "GameFontHighlightSmall")
-    main.count:SetPoint("LEFT", rosterTitle, "RIGHT", 10, 0)
-
-    local box = CreateFrame("EditBox", nil, main, "InputBoxTemplate")
-    box:SetSize(150, 22)
-    box:SetPoint("TOPLEFT", rosterTitle, "BOTTOMLEFT", 6, -8)
-    box:SetAutoFocus(false)
-    box:SetMaxLetters(48)
-    box:SetScript("OnEnterPressed", AddFromBox)
-    box:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-    main.nameBox = box
-
-    local add = Button(main, "Add", 76, 22)
-    add:SetPoint("LEFT", box, "RIGHT", 6, 0)
-    add:SetScript("OnClick", AddFromBox)
-
-    local import = Button(main, "Import Party", 238, 22)
-    import:SetPoint("TOPLEFT", box, "BOTTOMLEFT", -6, -6)
-    import:SetScript("OnClick", function()
-        local added, skipped, unreadable = ns.ImportParty()
-        local parts = {added .. " added"}
-        if skipped > 0 then parts[#parts + 1] = skipped .. " already on the roster" end
-        if unreadable > 0 then parts[#parts + 1] = unreadable .. " name(s) unreadable right now" end
-        SetMessage("Import: " .. table.concat(parts, ", ") .. ".", 0.6, 0.9, 1)
-        UI.RefreshRoster()
+    local go = W.Button(panel, "Randomize!", 10, 34, "accent")
+    go:SetPoint("TOPLEFT", head, "BOTTOMLEFT", 0, -10)
+    go:SetPoint("TOPRIGHT", head, "BOTTOMRIGHT", 0, -10)
+    go:SetScript("OnClick", function()
+        PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
+        DoRoll(false)
     end)
 
-    local sf, child = ScrollArea(main, 236, 262)
-    sf:SetPoint("TOPLEFT", import, "BOTTOMLEFT", 0, -8)
-    main.rosterChild = child
-
-    main.empty = Label(main, "GameFontDisableSmall",
-        "Add people by name or import\nyour party, then click a name\nto pick their specs.")
-    main.empty:SetPoint("TOP", sf, "TOP", 0, -20)
-
-    -- Divider
-    local line = main:CreateTexture(nil, "ARTWORK")
-    line:SetColorTexture(1, 1, 1, 0.12)
-    line:SetSize(1, MAIN_H - 80)
-    line:SetPoint("TOPLEFT", 290, -44)
-
-    -- Right: randomize and the result
-    local randomize = Button(main, "Randomize!", 300, 40)
-    randomize:SetPoint("TOPLEFT", 304, -48)
-    randomize:SetNormalFontObject("GameFontNormalLarge")
-    randomize:SetHighlightFontObject("GameFontHighlightLarge")
-    randomize:SetScript("OnClick", function() DoRoll(false) end)
-
-    local results = CreateFrame("Frame", nil, main)
-    results:SetSize(300, 5 * 44)
-    results:SetPoint("TOPLEFT", randomize, "BOTTOMLEFT", 0, -12)
+    local results = CreateFrame("Frame", nil, panel)
+    results:SetPoint("TOPLEFT", go, "BOTTOMLEFT", 0, -8)
+    results:SetPoint("TOPRIGHT", go, "BOTTOMRIGHT", 0, -8)
+    results:SetHeight(R.GROUP_SIZE * RESULT_ROW_H)
+    roll.results = results
     for i = 1, R.GROUP_SIZE do resultRows[i] = CreateResultRow(results, i) end
 
-    main.placeholder = Label(main, "GameFontDisable",
-        "Tick five available people,\nthen press Randomize.")
-    main.placeholder:SetPoint("CENTER", results, "CENTER")
+    roll.resultEmpty = W.Text(panel, 12, "textDim")
+    roll.resultEmpty:SetPoint("CENTER", results, "CENTER")
+    roll.resultEmpty:SetWidth(200)
+    roll.resultEmpty:SetText("Switch on who's playing (one to five), then press Randomize.")
 
-    main.reroll = Button(main, "Re-roll", 146, 24)
-    main.reroll:SetPoint("TOPLEFT", results, "BOTTOMLEFT", 0, -6)
-    main.reroll:SetScript("OnClick", function() DoRoll(true) end)
+    roll.reroll = W.Button(panel, "Re-roll", 10, 24)
+    roll.reroll:SetPoint("TOPLEFT", results, "BOTTOMLEFT", 0, -8)
+    roll.reroll:SetPoint("RIGHT", results, "CENTER", -3, 0)
+    roll.reroll:SetScript("OnClick", function() DoRoll(true) end)
 
-    main.announce = Button(main, "Announce", 146, 24)
-    main.announce:SetPoint("LEFT", main.reroll, "RIGHT", 8, 0)
-    main.announce:SetScript("OnClick", function() ns.Announce() end)
+    roll.announce = W.Button(panel, "Announce", 10, 24)
+    roll.announce:SetPoint("TOPRIGHT", results, "BOTTOMRIGHT", 0, -8)
+    roll.announce:SetPoint("LEFT", results, "CENTER", 3, 0)
+    roll.announce:SetScript("OnClick", function() ns.Announce() end)
 
-    message = Label(main, "GameFontNormalSmall")
-    message:SetPoint("TOPLEFT", main.reroll, "BOTTOMLEFT", 0, -8)
-    message:SetWidth(300)
-    message:SetJustifyH("LEFT")
-
-    -- Settings, along the bottom of the right column
-    local rotation = Check(main, 22)
-    rotation:SetPoint("BOTTOMLEFT", 300, 40)
-    local rotationLabel = Label(main, "GameFontHighlightSmall", "Rotate roles (avoid repeats from last game)")
-    rotationLabel:SetPoint("LEFT", rotation, "RIGHT", 2, 0)
-    rotation:SetScript("OnClick", function(self) ns.db.settings.rotation = self:GetChecked() and true or false end)
-    main.rotation = rotation
-
-    local auto = Check(main, 22)
-    auto:SetPoint("BOTTOMLEFT", 300, 18)
-    local autoLabel = Label(main, "GameFontHighlightSmall", "Announce to chat after every roll")
-    autoLabel:SetPoint("LEFT", auto, "RIGHT", 2, 0)
-    auto:SetScript("OnClick", function(self) ns.db.settings.autoAnnounce = self:GetChecked() and true or false end)
-    main.auto = auto
+    roll.message = W.Text(panel, 11, "critical")
+    roll.message:SetPoint("TOPLEFT", roll.reroll, "BOTTOMLEFT", 0, -10)
+    roll.message:SetPoint("RIGHT", panel, "RIGHT", -10, 0)
+    roll.message:SetJustifyH("LEFT")
 end
 
 -----------------------------------------------------------------------
--- Spec picker
+-- Pages
 -----------------------------------------------------------------------
 
-local specChecks = {}  -- [specID] = checkbutton
+local function BuildRollPage(host)
+    ns.BuildClassData()
 
-local function CreatePicker()
-    picker = MakeWindow("RoleRoulettePicker", PICKER_W, MAIN_H, "Specs")
-    picker:SetPoint("TOPLEFT", main, "TOPRIGHT", -4, 0)
-    picker:SetScript("OnHide", function()
-        selected = nil
-        UI.RefreshRoster()
-    end)
+    local roster = W.Panel(host)
+    roster:SetPoint("TOPLEFT", 8, -4)
+    roster:SetPoint("BOTTOMLEFT", 8, 8)
+    roster:SetWidth(ROSTER_W)
+    BuildRoster(roster)
 
-    local hint = Label(picker, "GameFontHighlightSmall", "Tick everything this person is willing to play.")
-    hint:SetPoint("TOPLEFT", 26, -50)
+    local result = W.Panel(host)
+    result:SetPoint("TOPRIGHT", -8, -4)
+    result:SetPoint("BOTTOMRIGHT", -8, 8)
+    result:SetWidth(RESULT_W)
+    BuildResult(result)
 
-    local clear = Button(picker, "Clear", 70, 20)
-    clear:SetPoint("TOPRIGHT", -34, -44)
-    clear:SetScript("OnClick", function()
-        if not selected then return end
-        wipe(selected.specs)
-        UI.RefreshPicker()
-        UI.RefreshRoster()
-    end)
+    local specs = W.Panel(host)
+    specs:SetPoint("TOPLEFT", roster, "TOPRIGHT", GAP, 0)
+    specs:SetPoint("BOTTOMRIGHT", result, "BOTTOMLEFT", -GAP, 0)
+    BuildSpecs(specs)
 
-    local sf, child = ScrollArea(picker, PICKER_W - 64, MAIN_H - 100)
-    sf:SetPoint("TOPLEFT", 22, -70)
+    UI.Refresh()
+end
 
-    -- Two columns of class blocks; each block is a coloured class name over
-    -- one checkbox per spec.
-    local colW = (PICKER_W - 64) / 2
-    local colY = {0, 0}
-    for i, class in ipairs(ns.Classes) do
-        local col = (i - 1) % 2 + 1
-        local x, y = (col - 1) * colW, colY[col]
+-- Grey explanation under a control; x defaults to lining up with a toggle's label.
+local function Note(parent, text, anchor, x, y)
+    local fs = W.Text(parent, 11, "textDim")
+    fs:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", x or 37, y or -4)
+    fs:SetPoint("RIGHT", parent, "RIGHT", -20, 0)
+    fs:SetJustifyH("LEFT")
+    fs:SetText(text)
+    return fs
+end
 
-        local header = Label(child, "GameFontNormal", class.name)
-        header:SetPoint("TOPLEFT", x + 4, -y)
-        header:SetTextColor(ns.ClassColor(class.classID))
-        y = y + 18
+local function BuildSettingsPage(host)
+    local s = ns.db.settings
 
-        for _, spec in ipairs(class.specs) do
-            local cb = Check(child, 22)
-            cb:SetPoint("TOPLEFT", x, -y)
-            local role = child:CreateTexture(nil, "ARTWORK")
-            role:SetSize(14, 14)
-            role:SetPoint("LEFT", cb, "RIGHT", 0, 0)
-            ns.SetRoleIcon(role, spec.role)
-            local icon = child:CreateTexture(nil, "ARTWORK")
-            icon:SetSize(18, 18)
-            icon:SetPoint("LEFT", role, "RIGHT", 3, 0)
-            icon:SetTexture(spec.icon)
-            icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
-            local name = Label(child, "GameFontHighlightSmall", spec.name)
-            name:SetPoint("LEFT", icon, "RIGHT", 4, 0)
+    local rolling = W.Section(host, "Rolling")
+    rolling:SetPoint("TOPLEFT", 12, -10)
+    rolling:SetPoint("TOPRIGHT", -12, -10)
 
-            local classID, specID = class.classID, spec.specID
-            cb:SetScript("OnClick", function(self)
-                if not selected then return end
-                ns.SetSpec(selected, classID, specID, self:GetChecked() and true or false)
-                UI.RefreshRoster()
-            end)
-            specChecks[specID] = cb
-            y = y + 22
+    local rotation = W.Toggle(host, "Rotate roles", function(on) s.rotation = on end)
+    rotation:SetPoint("TOPLEFT", rolling, "BOTTOMLEFT", 2, -14)
+    rotation:SetChecked(s.rotation)
+    local n1 = Note(host, "Makes it much less likely that anyone gets the same role as last game. "
+        .. "Re-rolling doesn't count as a game.", rotation)
+
+    local auto = W.Toggle(host, "Announce to chat after every roll", function(on) s.autoAnnounce = on end)
+    auto:SetPoint("TOPLEFT", n1, "BOTTOMLEFT", -37, -14)
+    auto:SetChecked(s.autoAnnounce)
+    local n2 = Note(host, "Posts each result to party chat. The Announce button works either way.", auto)
+
+    local LST = Theme()
+    if not LST then return end
+    local theme = W.Section(host, "Theme")
+    theme:SetPoint("TOPLEFT", n2, "BOTTOMLEFT", -39, -22)
+    theme:SetPoint("RIGHT", host, "RIGHT", -12, 0)
+
+    local buttons, prev = {}, nil
+    local function Mark()
+        for key, b in pairs(buttons) do b:SetActive(key == LST:PresetKey()) end
+    end
+    for _, key in ipairs(LST.ORDER) do
+        local preset = LST.PRESETS[key]
+        local b = W.Button(host, preset.name, 104, 24)
+        if prev then
+            b:SetPoint("LEFT", prev, "RIGHT", 6, 0)
+        else
+            b:SetPoint("TOPLEFT", theme, "BOTTOMLEFT", 2, -12)
         end
-        colY[col] = y + 10
+        b:HookScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+            GameTooltip:SetText(preset.name, 1, 1, 1)
+            GameTooltip:AddLine(preset.tip, nil, nil, nil, true)
+            GameTooltip:Show()
+        end)
+        b:HookScript("OnLeave", function() GameTooltip:Hide() end)
+        b:SetScript("OnClick", function()
+            local from = LST:PresetKey()
+            if from == key then return end
+            LST:SetPreset(key)
+            Mark()
+            if LST:NeedsReload(from, key) then
+                ns.Print("theme set to " .. preset.name .. ". /reload to see it fully.")
+            end
+        end)
+        buttons[key] = b
+        prev = b
     end
-    child:SetHeight(math.max(colY[1], colY[2]))
-end
-
-function UI.RefreshPicker()
-    if not (picker and selected) then return end
-    picker.title:SetText("Specs for " .. selected.name)
-    for specID, cb in pairs(specChecks) do
-        cb:SetChecked(ns.HasSpec(selected, specID))
-    end
-end
-
-function UI.Select(member)
-    if not member then
-        if picker then picker:Hide() end
-        return
-    end
-    -- The picker is built the first time it is needed, out of combat.
-    if not picker and InCombatLockdown() then
-        ns.Print("the spec picker opens after combat.")
-        ns.OutOfCombat("picker", function() UI.Select(member) end)
-        return
-    end
-    if not picker then CreatePicker() end
-    selected = member
-    picker:Show()
-    UI.RefreshPicker()
-    UI.RefreshRoster()
+    Mark()
+    Note(host, "One theme covers RoleRoulette, SquizzFrames and Squizzumables. "
+        .. "The accent changes at once; the rest after a /reload.", buttons[LST.ORDER[1]], 0, -10)
 end
 
 -----------------------------------------------------------------------
--- Open / close
+-- Window
 -----------------------------------------------------------------------
+
+local function SaveWindow()
+    if not win then return end
+    local f = win.frame
+    local point, _, relPoint, x, y = f:GetPoint(1)
+    if not point then return end
+    ns.db.window = {point = point, relPoint = relPoint, x = x, y = y,
+                    w = f:GetWidth(), h = f:GetHeight()}
+end
+
+local function RestoreWindow()
+    local p = ns.db.window
+    if type(p) ~= "table" or not p.point then return end
+    local f = win.frame
+    f:ClearAllPoints()
+    f:SetPoint(p.point, UIParent, p.relPoint or p.point, p.x or 0, p.y or 0)
+    if p.w and p.h then f:SetSize(p.w, p.h) end
+end
+
+-- Pages, sidebar and search entries. Done at PLAYER_LOGIN, after every addon
+-- has loaded, so RoleRoulette comes after SquizzFrames and Squizzumables in
+-- the combined /squizz window rather than ahead of them.
+function UI.Register()
+    local S = Shell()
+    if not S then return end
+    S:RegisterAddon(ADDON_ID, {title = "RoleRoulette", groups = {
+        {label = "Group", pages = {
+            {key = "roll", label = "Roll", layout = "fill",
+             subtitle = "Who tanks, who heals, and what everyone plays",
+             build = BuildRollPage, onShow = function() UI.Refresh() end},
+        }},
+        {label = "General", pages = {
+            {key = "settings", label = "Settings", layout = "scroll", height = 320,
+             subtitle = "Rotation, announcing and theme",
+             build = BuildSettingsPage},
+        }},
+    }})
+    S:RegisterOpener(ADDON_ID, {
+        open = function(pageId, show)
+            local w = UI.Create()
+            if w and show then w:Open(pageId) end
+            return w
+        end,
+    })
+    local LST = Theme()
+    if LST then
+        LST:RegisterCallback(function()
+            W.RefreshAccent()
+            if win then win:RefreshAccent() end
+        end)
+    end
+end
+
+-- The window, built once and out of combat. nil while it has to wait.
+function UI.Create()
+    if win then return win end
+    local S = Shell()
+    if not S then
+        ns.Print("LibSquizzShell-1.0 is missing, so the window can't open.")
+        return nil
+    end
+    if InCombatLockdown() then return nil end
+    win = S:CreateWindow({
+        name = "RoleRouletteFrame",
+        addons = {ADDON_ID},
+        title = "ROLEROULETTE",
+        subtitle = "Random roles and specs",
+        width = 960, height = 600,
+        minWidth = 900, minHeight = 520,
+        combat = "fade",
+        onHide = SaveWindow,
+    })
+    RestoreWindow()
+    win.titleBar:HookScript("OnDragStop", SaveWindow)
+    win:BuildAllPages()
+    return win
+end
 
 function UI.Refresh()
-    if not main then return end
-    main.rotation:SetChecked(ns.db.settings.rotation)
-    main.auto:SetChecked(ns.db.settings.autoAnnounce)
     UI.RefreshRoster()
+    UI.RefreshSpecs()
     UI.RefreshResult()
-    UI.RefreshPicker()
 end
 
-function UI.Toggle()
-    if main and main:IsShown() then
-        main:Hide()
-        return
+function UI.Toggle(pageId)
+    local w = UI.Create()
+    if w then
+        w:Toggle(pageId)
+    elseif InCombatLockdown() then
+        ns.Print("the window opens when combat ends.")
+        ns.OutOfCombat("open", function() UI.Toggle(pageId) end)
     end
-    if not main then
-        if InCombatLockdown() then
-            ns.Print("the window opens when combat ends.")
-            ns.OutOfCombat("open", UI.Toggle)
-            return
-        end
-        ns.BuildClassData()
-        CreateMain()
-    end
-    main:Show()
-    UI.Refresh()
 end
