@@ -274,7 +274,9 @@ local function BuildSpecs(panel)
 
     local hint = W.Text(panel, 11, "textDim")
     hint:SetPoint("TOPLEFT", roll.specHead, "BOTTOMLEFT", 0, -8)
-    hint:SetText("Tick everything they're willing to play.")
+    hint:SetPoint("RIGHT", panel, "RIGHT", -10, 0)  -- wraps instead of running into the next column
+    hint:SetJustifyH("LEFT")
+    hint:SetText("Tick every spec they'll play.")
     roll.specHint = hint
 
     local sf, child = W.ScrollArea(panel)
@@ -404,7 +406,9 @@ function UI.RefreshResult()
             row.spec:SetTexture(spec and spec.icon or 134400) -- question mark
             row.who:SetText(e.name)
             row.who:SetTextColor(ns.ClassColor(e.classID))
-            row.detail:SetText(string.format("%s  %s %s", R.ROLE_LABEL[e.role] or "",
+            -- No role word: the icon on the left already says it, and the
+            -- room is needed for names like "Marksmanship Hunter".
+            row.detail:SetText(string.format("%s %s",
                 spec and spec.name or "Unknown spec", class and class.name or ""))
             row:Show()
         else
